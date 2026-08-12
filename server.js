@@ -60,6 +60,55 @@ app.post('/analyze', async (req, res) => {
   }
 });
 
+app.post('/detect-text', async (req, res) => {
+  try {
+    const { image, targetText } = req.body;
+    if (!image || !targetText) {
+      return res.status(400).json({ error: 'Missing image or targetText' });
+    }
+    if (!GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server missing GEMINI_API_KEY' });
+    }
+
+    const geminiResponse = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `Look at this image. Does it contain the exact text "${targetText}" (case-insensitive is fine)? Reply with ONLY one word: YES or NO. Nothing else.`
+              },
+              {
+                inline_data: {
+                  mime_type: 'image/jpeg',
+                  data: image
+                }
+              }
+            ]
+          }
+        ]
+      })
+    });
+
+    const data = await geminiResponse.json();
+
+    if (!geminiResponse.ok) {
+      console.error('Gemini API error:', data);
+      return res.status(500).json({ error: data.error?.message || 'Gemini API error' });
+    }
+
+    const replyText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
+    const matched = replyText.includes('YES');
+
+    res.json({ matched, raw: replyText });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong detecting text.' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
