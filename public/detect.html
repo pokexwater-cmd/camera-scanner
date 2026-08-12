@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Text Detector</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0a0a0d;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #f5f5f7;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  #camera-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    background: #000;
+    overflow: hidden;
+    touch-action: none;
+  }
+  video, canvas#capture-canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  canvas#capture-canvas { display: none; }
+
+  #selection-box {
+    position: absolute;
+    border: 2px solid #4ade80;
+    background: rgba(74, 222, 128, 0.15);
+    display: none;
+    pointer-events: none;
+  }
+  #selection-box.active { display: block; }
+
+  #status-badge {
+    position: absolute;
+    top: max(14px, env(safe-area-inset-top, 14px));
+    left: 14px;
+    right: 14px;
+    text-align: center;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    background: rgba(30,30,36,0.9);
+    color: #cfcfd6;
+    display: none;
+    z-index: 5;
+  }
+  #status-badge.visible { display: block; }
+  #status-badge.detected {
+    background: rgba(74, 222, 128, 0.95);
+    color: #06280f;
+  }
+  #status-badge.watching {
+    background: rgba(60,60,70,0.9);
+  }
+
+  #toast {
+    position: absolute;
+    top: max(14px, env(safe-area-inset-top, 14px));
+    left: 14px;
+    right: 14px;
+    background: rgba(220,60,60,0.95);
+    color: #fff;
+    padding: 12px 16px;
+    border-radius: 10px;
+    text-align: center;
+    font-size: 13px;
+    display: none;
+    z-index: 10;
+  }
+  #toast.visible { display: block; }
+
+  #controls {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+    background: #0a0a0d;
+    border-top: 1px solid #1c1c22;
+  }
+  #target-input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #2a2a32;
+    background: #16161b;
+    color: #f5f5f7;
+    font-size: 15px;
+  }
+  #target-input::placeholder { color: #6b6b74; }
+
+  .row { display: flex; gap: 10px; }
+  button.action-btn {
+    flex: 1;
+    padding: 13px;
+    border-radius: 10px;
+    border: none;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    -webkit-appearance: none;
+  }
+  #start-btn { background: #4ade80; color: #06280f; }
+  #start-btn:active { background: #3fc76f; }
+  #start-btn:disabled { opacity: 0.4; }
+  #stop-btn { background: #2a2a32; color: #f5f5f7; display: none; }
+  #stop-btn:active { background: #38383f; }
+  #clear-box-btn { background: #2a2a32; color: #f5f5f7; }
+  #clear-box-btn:active { background: #38383f; }
+
+  #hint {
+    font-size: 12px;
+    color: #8a8a92;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="camera-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="capture-canvas"></canvas>
+  <div id="selection-box"></div>
+  <div id="status-badge"></div>
+  <div id="toast"></div>
+</div>
+
+<div id="controls">
+  <input id="target-input" type="text" placeholder="Text to detect (e.g. Froakie)" />
+  <div id="hint">Drag on the camera view to draw a detection box</div>
+  <div class="row">
+    <button id="clear-box-btn" class="action-btn">Clear box</button>
+    <button id="start-btn" class="action-btn">Start watching</button>
+    <button id="stop-btn" class="action-btn">Stop</button>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const captureCanvas = document.getElementById('capture-canvas');
+const cameraWrap = document.getElementById('camera-wrap');
+const selectionBox = document.getElementById('selection-box');
+const statusBadge = document.getElementById('status-badge');
+const toast = document.getElementById('toast');
+const targetInput = document.getElementById('target-input');
+const startBtn = document.getElementById('start-btn');
+const stopBtn = document.getElementById('stop-btn');
+const clearBoxBtn = document.getElementById('clear-box-btn');
+
+const API_URL = '/detect-text';
+const POLL_INTERVAL_MS = 2500;
+
+let box = null; // { x, y, w, h } in pixels relative to camera-wrap
+let dragStart = null;
+let pollTimer = null;
+let isWatching = false;
+
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('visible');
+  setTimeout(() => toast.classList.remove('visible'), 4000);
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+  } catch (err) {
+    showToast('Camera error: ' + err.message);
+  }
+}
+
+// --- Drag to draw selection box ---
+function getPos(e) {
+  const rect = cameraWrap.getBoundingClientRect();
+  const point = e.touches ? e.touches[0] : e;
+  return {
+    x: point.clientX - rect.left,
+    y: point.clientY - rect.top
+  };
+}
+
+function onDragStart(e) {
+  if (isWatching) return; // lock box while watching
+  dragStart = getPos(e);
+  selectionBox.classList.add('active');
+}
+
+function onDragMove(e) {
+  if (!dragStart || isWatching) return;
+  const pos = getPos(e);
+  const x = Math.min(dragStart.x, pos.x);
+  const y = Math.min(dragStart.y, pos.y);
+  const w = Math.abs(pos.x - dragStart.x);
+  const h = Math.abs(pos.y - dragStart.y);
+  selectionBox.style.left = x + 'px';
+  selectionBox.style.top = y + 'px';
+  selectionBox.style.width = w + 'px';
+  selectionBox.style.height = h + 'px';
+  box = { x, y, w, h };
+}
+
+function onDragEnd() {
+  dragStart = null;
+}
+
+cameraWrap.addEventListener('mousedown', onDragStart);
+cameraWrap.addEventListener('mousemove', onDragMove);
+window.addEventListener('mouseup', onDragEnd);
+
+cameraWrap.addEventListener('touchstart', onDragStart, { passive: true });
+cameraWrap.addEventListener('touchmove', onDragMove, { passive: true });
+window.addEventListener('touchend', onDragEnd);
+
+clearBoxBtn.addEventListener('click', () => {
+  if (isWatching) return;
+  box = null;
+  selectionBox.classList.remove('active');
+});
+
+// --- Crop the selected region from the video frame ---
+function captureBoxImage() {
+  const rect = cameraWrap.getBoundingClientRect();
+  // Scale from displayed size to actual video resolution
+  const scaleX = video.videoWidth / rect.width;
+  const scaleY = video.videoHeight / rect.height;
+
+  const sx = box.x * scaleX;
+  const sy = box.y * scaleY;
+  const sw = box.w * scaleX;
+  const sh = box.h * scaleY;
+
+  captureCanvas.width = sw;
+  captureCanvas.height = sh;
+  const ctx = captureCanvas.getContext('2d');
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  return captureCanvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+// --- Polling loop ---
+async function checkOnce() {
+  const target = targetInput.value.trim();
+  if (!box || box.w < 10 || box.h < 10) {
+    showToast('Draw a detection box first.');
+    stopWatching();
+    return;
+  }
+  if (!target) {
+    showToast('Type the text to detect.');
+    stopWatching();
+    return;
+  }
+
+  const base64 = captureBoxImage();
+
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: base64, targetText: target })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+
+    if (data.matched) {
+      statusBadge.textContent = '✅ Detected: ' + target;
+      statusBadge.className = 'status-badge visible detected';
+      statusBadge.id = 'status-badge';
+      stopWatching(false); // stop polling but keep "detected" message visible
+    } else {
+      statusBadge.textContent = 'Watching…';
+      statusBadge.className = 'status-badge visible watching';
+      statusBadge.id = 'status-badge';
+    }
+  } catch (err) {
+    showToast('Error: ' + err.message);
+  }
+}
+
+function startWatching() {
+  const target = targetInput.value.trim();
+  if (!box || box.w < 10 || box.h < 10) {
+    showToast('Draw a detection box on the camera first.');
+    return;
+  }
+  if (!target) {
+    showToast('Type the text you want to detect.');
+    return;
+  }
+  isWatching = true;
+  startBtn.style.display = 'none';
+  stopBtn.style.display = 'block';
+  targetInput.disabled = true;
+  clearBoxBtn.disabled = true;
+
+  statusBadge.textContent = 'Watching…';
+  statusBadge.className = 'status-badge visible watching';
+  statusBadge.id = 'status-badge';
+
+  checkOnce();
+  pollTimer = setInterval(checkOnce, POLL_INTERVAL_MS);
+}
+
+function stopWatching(hideStatus = true) {
+  isWatching = false;
+  startBtn.style.display = 'block';
+  stopBtn.style.display = 'none';
+  targetInput.disabled = false;
+  clearBoxBtn.disabled = false;
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  if (hideStatus) {
+    statusBadge.classList.remove('visible');
+  }
+}
+
+startBtn.addEventListener('click', startWatching);
+stopBtn.addEventListener('click', () => stopWatching(true));
+
+startCamera();
+</script>
+
+</body>
+</html>
